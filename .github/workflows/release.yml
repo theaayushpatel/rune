@@ -63,7 +63,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: amd64
-          Maintainer: Rune Team <https://github.com/${{ github.repository }}>
+          Maintainer: Rune Team <https://github.com/${GITHUB_REPOSITORY}>
           Description: Universal local-first authenticator (Desktop & CLI)
            Rune provides an ultra-fast Raycast-style desktop launcher and
            terminal CLI runtime for 2FA / TOTP authentication.
