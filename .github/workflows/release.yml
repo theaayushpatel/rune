@@ -57,7 +57,7 @@ jobs:
           mkdir -p "$DEB_DIR/usr/share/applications"
           mkdir -p "$DEB_DIR/usr/share/icons/hicolor/512x512/apps"
 
-          cat << EOF > "$DEB_DIR/DEBIAN/control
+          cat << EOF > "$DEB_DIR/DEBIAN/control"
           Package: rune
           Version: $VERSION
           Section: utils
