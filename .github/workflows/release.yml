@@ -33,7 +33,7 @@ jobs:
       - name: Build release binaries (CLI & Desktop)
         run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
 
-      # Package 1: Universal Tarball with install.sh / uninstall.sh
+      # Package 1: Universal Tarball with install.sh
       - name: Package Universal Linux Tarball
         run: |
           mkdir -p staging_tar
@@ -49,7 +49,8 @@ jobs:
       # Package 2: Native Debian / Ubuntu .deb package
       - name: Build Debian .deb Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG_NAME="${GITHUB_REF_NAME}"
+          VERSION="${TAG_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
           DEB_DIR="staging_deb"
           mkdir -p "$DEB_DIR/DEBIAN"
@@ -57,17 +58,7 @@ jobs:
           mkdir -p "$DEB_DIR/usr/share/applications"
           mkdir -p "$DEB_DIR/usr/share/icons/hicolor/512x512/apps"
 
-          cat << EOF > "$DEB_DIR/DEBIAN/control
-          Package: rune
-          Version: $VERSION
-          Section: utils
-          Priority: optional
-          Architecture: amd64
-          Maintainer: Rune Team <https://github.com/${{ github.repository }}>
-          Description: Universal local-first authenticator (Desktop & CLI)
-           Rune provides an ultra-fast Raycast-style desktop launcher and
-           terminal CLI runtime for 2FA / TOTP authentication.
-          EOF
+          sed "s/VERSION_PLACEHOLDER/$VERSION/g" assets/debian-control > "$DEB_DIR/DEBIAN/control"
 
           cp target/x86_64-unknown-linux-gnu/release/rune-desktop "$DEB_DIR/usr/bin/"
           chmod 755 "$DEB_DIR/usr/bin/rune-desktop"
@@ -135,20 +126,18 @@ jobs:
             rune-windows-x86_64-installer.exe
 
   # --------------------------------------------------------------------------
-  # 3. macOS: Builds Desktop + CLI -> .dmg installer disk image + .tar.gz
+  # 3. macOS: Builds Desktop + CLI for Apple Silicon and Intel on macos-latest
   # --------------------------------------------------------------------------
   build-macos:
     name: macOS Package (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             arch: arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             arch: x86_64
     steps:
       - name: Checkout repository
@@ -188,41 +177,11 @@ jobs:
           sips -z 512 512   assets/rune.png --out rune.iconset/icon_512x512.png
           iconutil -c icns rune.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-          # Create Info.plist
-          cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>rune-desktop</string>
-              <key>CFBundleIconFile</key>
-              <string>AppIcon</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.rune.authenticator</string>
-              <key>CFBundleName</key>
-              <string>Rune</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>0.1.0</string>
-              <key>LSMinimumSystemVersion</key>
-              <string>10.15</string>
-              <key>NSHighResolutionCapable</key>
-              <true/>
-          </dict>
-          </plist>
-          EOF
+          # Copy Info.plist
+          cp assets/Info.plist "$APP_DIR/Contents/Info.plist"
 
-          # Create CLI install command inside staging folder
-          cat << 'EOF' > "staging_dmg/Install CLI Command.command"
-          #!/bin/bash
-          echo "Installing Rune CLI to /usr/local/bin/rune..."
-          sudo mkdir -p /usr/local/bin
-          sudo ln -sf "/Applications/Rune.app/Contents/MacOS/rune" /usr/local/bin/rune
-          echo "✓ Rune CLI successfully installed! Type 'rune --help' in terminal."
-          read -p "Press enter to exit..."
-          EOF
+          # Copy CLI install command
+          cp "assets/Install CLI Command.command" "staging_dmg/Install CLI Command.command"
           chmod +x "staging_dmg/Install CLI Command.command"
 
           # Add /Applications symlink for drag and drop

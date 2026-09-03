@@ -1,0 +1,9 @@
+Package: rune
+Version: VERSION_PLACEHOLDER
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Rune Team <https://github.com/theaayushpatel/rune>
+Description: Universal local-first authenticator (Desktop & CLI)
+ Rune provides an ultra-fast Raycast-style desktop launcher and
+ terminal CLI runtime for 2FA / TOTP authentication.
