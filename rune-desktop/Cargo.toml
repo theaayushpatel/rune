@@ -1,0 +1,20 @@
+[package]
+name = "rune-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rune-desktop"
+path = "src/main.rs"
+
+[dependencies]
+rune-core.workspace = true
+rune-adapter-uri.workspace = true
+rune-adapter-aegis.workspace = true
+eframe.workspace = true
+arboard.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }

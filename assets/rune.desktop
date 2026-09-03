@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Rune
+GenericName=Authenticator
+Comment=Universal Local-First Authenticator
+Exec=rune-desktop
+Icon=rune
+Terminal=false
+Type=Application
+Categories=Utility;Security;
+Keywords=2fa;otp;totp;authenticator;aegis;
+StartupWMClass=rune-desktop

@@ -1,0 +1,7 @@
+/target
+/rune-desktop/node_modules
+/rune-desktop/dist
+/rune-desktop/src-tauri/target
+**/*.rs.bk
+*.swp
+.DS_Store

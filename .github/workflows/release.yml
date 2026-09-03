@@ -1,0 +1,243 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Linux: Builds Desktop + CLI -> .deb package + universal tarball with install.sh
+  # --------------------------------------------------------------------------
+  build-linux:
+    name: Linux Package (Desktop & CLI)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libx11-dev libasound2-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build release binaries (CLI & Desktop)
+        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+
+      # Package 1: Universal Tarball with install.sh / uninstall.sh
+      - name: Package Universal Linux Tarball
+        run: |
+          mkdir -p staging_tar
+          cp target/x86_64-unknown-linux-gnu/release/rune-desktop staging_tar/
+          cp target/x86_64-unknown-linux-gnu/release/rune staging_tar/
+          cp assets/rune.png staging_tar/
+          cp assets/rune.desktop staging_tar/
+          cp scripts/install.sh staging_tar/
+          chmod +x staging_tar/install.sh
+          cp README.md staging_tar/
+          tar -czvf rune-linux-x86_64.tar.gz -C staging_tar .
+
+      # Package 2: Native Debian / Ubuntu .deb package
+      - name: Build Debian .deb Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+          DEB_DIR="staging_deb"
+          mkdir -p "$DEB_DIR/DEBIAN"
+          mkdir -p "$DEB_DIR/usr/bin"
+          mkdir -p "$DEB_DIR/usr/share/applications"
+          mkdir -p "$DEB_DIR/usr/share/icons/hicolor/512x512/apps"
+
+          cat << EOF > "$DEB_DIR/DEBIAN/control
+          Package: rune
+          Version: $VERSION
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Rune Team <https://github.com/${{ github.repository }}>
+          Description: Universal local-first authenticator (Desktop & CLI)
+           Rune provides an ultra-fast Raycast-style desktop launcher and
+           terminal CLI runtime for 2FA / TOTP authentication.
+          EOF
+
+          cp target/x86_64-unknown-linux-gnu/release/rune-desktop "$DEB_DIR/usr/bin/"
+          chmod 755 "$DEB_DIR/usr/bin/rune-desktop"
+          cp target/x86_64-unknown-linux-gnu/release/rune "$DEB_DIR/usr/bin/"
+          chmod 755 "$DEB_DIR/usr/bin/rune"
+          cp assets/rune.desktop "$DEB_DIR/usr/share/applications/"
+          cp assets/rune.png "$DEB_DIR/usr/share/icons/hicolor/512x512/apps/"
+
+          dpkg-deb --build "$DEB_DIR" "rune_${VERSION}_linux_amd64.deb"
+
+      - name: Upload Linux artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            *.tar.gz
+            *.deb
+
+  # --------------------------------------------------------------------------
+  # 2. Windows: Builds Desktop + CLI -> Inno Setup .exe installer + .zip
+  # --------------------------------------------------------------------------
+  build-windows:
+    name: Windows Package (Desktop & CLI)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binaries (CLI & Desktop)
+        run: cargo build --release --workspace --target x86_64-pc-windows-msvc
+
+      # Stage files for packaging
+      - name: Prepare Windows Staging Directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item target\x86_64-pc-windows-msvc\release\rune-desktop.exe staging\
+          Copy-Item target\x86_64-pc-windows-msvc\release\rune.exe staging\
+          Copy-Item assets\rune.ico staging\
+          Copy-Item assets\rune.png staging\
+          Copy-Item README.md staging\
+
+      # Package 1: Standalone Portable ZIP
+      - name: Create Portable Windows ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path staging\* -DestinationPath rune-windows-x86_64.zip
+
+      # Package 2: Inno Setup Windows Installer (.exe)
+      - name: Compile Inno Setup Windows Installer
+        run: |
+          iscc assets\rune-installer.iss
+
+      - name: Upload Windows artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            *.zip
+            rune-windows-x86_64-installer.exe
+
+  # --------------------------------------------------------------------------
+  # 3. macOS: Builds Desktop + CLI -> .dmg installer disk image + .tar.gz
+  # --------------------------------------------------------------------------
+  build-macos:
+    name: macOS Package (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binaries (CLI & Desktop)
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package macOS App Bundle and DMG
+        run: |
+          APP_NAME="Rune.app"
+          APP_DIR="staging_dmg/$APP_NAME"
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/Resources"
+
+          # Copy Desktop & CLI executables
+          cp "target/${{ matrix.target }}/release/rune-desktop" "$APP_DIR/Contents/MacOS/rune-desktop"
+          chmod +x "$APP_DIR/Contents/MacOS/rune-desktop"
+          cp "target/${{ matrix.target }}/release/rune" "$APP_DIR/Contents/MacOS/rune"
+          chmod +x "$APP_DIR/Contents/MacOS/rune"
+
+          # Create macOS ICNS icon
+          mkdir -p rune.iconset
+          sips -z 16 16     assets/rune.png --out rune.iconset/icon_16x16.png
+          sips -z 32 32     assets/rune.png --out rune.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/rune.png --out rune.iconset/icon_32x32.png
+          sips -z 64 64     assets/rune.png --out rune.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/rune.png --out rune.iconset/icon_128x128.png
+          sips -z 256 256   assets/rune.png --out rune.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/rune.png --out rune.iconset/icon_256x256.png
+          sips -z 512 512   assets/rune.png --out rune.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/rune.png --out rune.iconset/icon_512x512.png
+          iconutil -c icns rune.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+          # Create Info.plist
+          cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>rune-desktop</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.rune.authenticator</string>
+              <key>CFBundleName</key>
+              <string>Rune</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.1.0</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.15</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # Create CLI install command inside staging folder
+          cat << 'EOF' > "staging_dmg/Install CLI Command.command"
+          #!/bin/bash
+          echo "Installing Rune CLI to /usr/local/bin/rune..."
+          sudo mkdir -p /usr/local/bin
+          sudo ln -sf "/Applications/Rune.app/Contents/MacOS/rune" /usr/local/bin/rune
+          echo "✓ Rune CLI successfully installed! Type 'rune --help' in terminal."
+          read -p "Press enter to exit..."
+          EOF
+          chmod +x "staging_dmg/Install CLI Command.command"
+
+          # Add /Applications symlink for drag and drop
+          ln -s /Applications staging_dmg/Applications
+
+          # Create DMG Disk Image
+          hdiutil create -volname "Rune" -srcfolder staging_dmg -ov -format UDZO "rune-macos-${{ matrix.arch }}.dmg"
+
+          # Also create Tarball
+          tar -czvf "rune-macos-${{ matrix.arch }}.tar.gz" -C staging_dmg .
+
+      - name: Upload macOS artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            *.dmg
+            *.tar.gz

@@ -1,0 +1,22 @@
+[package]
+name = "rune-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rune"
+path = "src/main.rs"
+
+[dependencies]
+rune-core.workspace = true
+rune-adapter-uri.workspace = true
+rune-adapter-aegis.workspace = true
+clap.workspace = true
+arboard.workspace = true
+colored.workspace = true
+crossterm.workspace = true
+rpassword.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

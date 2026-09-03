@@ -1,0 +1,8 @@
+# Sample URI collection for Rune testing
+# Format: otpauth://totp/Issuer:Account?secret=...&issuer=...
+
+otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA1&digits=6&period=30
+otpauth://totp/Google:alice@gmail.com?secret=HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ&issuer=Google&algorithm=SHA1&digits=6&period=30
+otpauth://totp/Cloudflare:ops?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Cloudflare&algorithm=SHA256&digits=6&period=30
+otpauth://totp/AWS:admin?secret=MFRGGZDFMZTWQ2LK&issuer=AWS&algorithm=SHA1&digits=6&period=30
+otpauth://totp/Proton:alice?secret=NBSWY3DPEB3W64TMMQ======&issuer=Proton&algorithm=SHA1&digits=6&period=30
