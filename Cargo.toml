@@ -4,6 +4,8 @@ members = [
     "rune-core",
     "rune-adapters/uri",
     "rune-adapters/aegis",
+    "rune-adapters/twofas",
+    "rune-adapters/kdbx",
     "rune-cli",
     "rune-desktop",
 ]
@@ -19,6 +21,11 @@ repository = "https://github.com/theaayushpatel/rune"
 rune-core = { path = "rune-core" }
 rune-adapter-uri = { path = "rune-adapters/uri" }
 rune-adapter-aegis = { path = "rune-adapters/aegis" }
+rune-adapter-twofas = { path = "rune-adapters/twofas" }
+rune-adapter-kdbx = { path = "rune-adapters/kdbx" }
+
+keepass = { version = "0.13", features = ["save_kdbx4"] }
+pbkdf2 = "0.12"
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

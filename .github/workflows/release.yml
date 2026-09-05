@@ -122,9 +122,37 @@ jobs:
           Compress-Archive -Path staging\* -DestinationPath rune-windows-x86_64.zip
 
       # Package 2: Inno Setup Windows Installer (.exe)
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
       - name: Compile Inno Setup Windows Installer
+        shell: pwsh
         run: |
-          iscc assets\rune-installer.iss
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) {
+            if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+              $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            } elseif (Test-Path "C:\Program Files\Inno Setup 6\ISCC.exe") {
+              $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+            }
+          }
+          if (-not $iscc) {
+            throw "ISCC (Inno Setup Compiler) was not found after installation."
+          }
+          Write-Host "Compiling installer using: $iscc"
+          & $iscc assets\rune-installer.iss
+
+          if (-not (Test-Path rune-windows-x86_64-installer.exe)) {
+            throw "Expected output rune-windows-x86_64-installer.exe was not created!"
+          }
+
+      - name: Upload Windows Artifacts (CI Run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rune-windows-x86_64
+          path: |
+            rune-windows-x86_64.zip
+            rune-windows-x86_64-installer.exe
 
       - name: Upload Windows artifacts to GitHub Release
         uses: softprops/action-gh-release@v2

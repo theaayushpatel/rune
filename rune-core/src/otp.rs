@@ -181,6 +181,67 @@ mod tests {
     }
 
     #[test]
+    fn test_rfc6238_sha256_and_sha512_vectors() {
+        let sha256_secret = b"12345678901234567890123456789012";
+        assert_eq!(
+            generate_totp(sha256_secret, 59, 30, 8, Algorithm::SHA256).unwrap(),
+            "46119246"
+        );
+        assert_eq!(
+            generate_totp(sha256_secret, 1111111109, 30, 8, Algorithm::SHA256).unwrap(),
+            "68084774"
+        );
+        assert_eq!(
+            generate_totp(sha256_secret, 1111111111, 30, 8, Algorithm::SHA256).unwrap(),
+            "67062674"
+        );
+        assert_eq!(
+            generate_totp(sha256_secret, 1234567890, 30, 8, Algorithm::SHA256).unwrap(),
+            "91819424"
+        );
+        assert_eq!(
+            generate_totp(sha256_secret, 2000000000, 30, 8, Algorithm::SHA256).unwrap(),
+            "90698825"
+        );
+
+        let sha512_secret = b"1234567890123456789012345678901234567890123456789012345678901234";
+        assert_eq!(
+            generate_totp(sha512_secret, 59, 30, 8, Algorithm::SHA512).unwrap(),
+            "90693936"
+        );
+        assert_eq!(
+            generate_totp(sha512_secret, 1111111109, 30, 8, Algorithm::SHA512).unwrap(),
+            "25091201"
+        );
+        assert_eq!(
+            generate_totp(sha512_secret, 1111111111, 30, 8, Algorithm::SHA512).unwrap(),
+            "99943326"
+        );
+        assert_eq!(
+            generate_totp(sha512_secret, 1234567890, 30, 8, Algorithm::SHA512).unwrap(),
+            "93441116"
+        );
+        assert_eq!(
+            generate_totp(sha512_secret, 2000000000, 30, 8, Algorithm::SHA512).unwrap(),
+            "38618901"
+        );
+    }
+
+    #[test]
+    fn test_rfc4226_hotp_vectors() {
+        let secret = b"12345678901234567890";
+        let expected = [
+            "755224", "287082", "359152", "969429", "338314",
+            "254676", "287922", "162583", "399871", "520489",
+        ];
+
+        for (count, exp) in expected.iter().enumerate() {
+            let code = generate_hotp(secret, count as u64, 6, Algorithm::SHA1).unwrap();
+            assert_eq!(&code, exp, "HOTP failed for count {}", count);
+        }
+    }
+
+    #[test]
     fn test_secret_cleaning() {
         // Hyphens, lowercase, spaces, padding
         let s1 = "gez-dgnb vgy3-tqoj qgez-dgnb vgy3-tqoj q===";
@@ -189,3 +250,4 @@ mod tests {
         assert_eq!(decoded1, decoded2);
     }
 }
+

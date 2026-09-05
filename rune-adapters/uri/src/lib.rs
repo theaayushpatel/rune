@@ -94,7 +94,7 @@ impl UriSource {
                 "issuer" => query_issuer = Some(val.to_string()),
                 "algorithm" => {
                     algorithm = Algorithm::from_str(&val)
-                        .map_err(|e| AdapterError::InvalidParameter(e))?;
+                        .map_err(AdapterError::InvalidParameter)?;
                 }
                 "digits" => {
                     digits = val

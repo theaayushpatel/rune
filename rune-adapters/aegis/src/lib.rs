@@ -232,7 +232,7 @@ mod tests {
         );
         let source = AegisSource::from_file(fixture_path);
 
-        assert_eq!(source.is_encrypted().unwrap(), false);
+        assert!(!source.is_encrypted().unwrap());
         let accounts = source.load().unwrap();
         assert_eq!(accounts.len(), 7);
 
@@ -250,7 +250,7 @@ mod tests {
         );
         let source = AegisSource::from_file(fixture_path).with_password("test");
 
-        assert_eq!(source.is_encrypted().unwrap(), true);
+        assert!(source.is_encrypted().unwrap());
         let accounts = source.load().unwrap();
         assert_eq!(accounts.len(), 7);
 
@@ -303,7 +303,7 @@ mod tests {
         let resolved = source.resolve_file().unwrap();
         assert_eq!(resolved, backup3);
 
-        assert_eq!(source.is_encrypted().unwrap(), true);
+        assert!(source.is_encrypted().unwrap());
         let accounts = source.load().unwrap();
         assert_eq!(accounts.len(), 7);
 

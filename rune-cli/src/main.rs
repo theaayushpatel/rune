@@ -9,6 +9,8 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use rune_adapter_aegis::AegisSource;
+use rune_adapter_kdbx::KdbxSource;
+use rune_adapter_twofas::TwoFasSource;
 use rune_adapter_uri::UriSource;
 use rune_core::models::OtpAccount;
 use rune_core::otp::generate_account_code;
@@ -25,13 +27,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     version = "0.1.0"
 )]
 struct Cli {
-    /// Path to the authenticator source file (.json for Aegis, .uri/.txt for URIs)
+    /// Path to the authenticator source file (.kdbx for KeePassXC, .2fas for 2FAS, .json for Aegis, .uri/.txt for URIs)
     #[arg(short, long, global = true)]
     source: Option<PathBuf>,
 
     /// Decryption password for encrypted vaults (will prompt if required and not provided)
     #[arg(short, long, global = true)]
     password: Option<String>,
+
+    /// Optional keyfile path for KeePassXC database decryption (.key / .keyx)
+    #[arg(short = 'k', long, global = true)]
+    keyfile: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -58,9 +64,9 @@ enum Commands {
     },
     /// Live terminal dashboard with auto-refreshing countdowns
     Watch,
-    /// Decrypt an Aegis backup file and dump the JSON payload
+    /// Decrypt an Aegis or 2FAS backup file and dump the JSON payload
     Decrypt {
-        /// Path to the encrypted Aegis JSON backup
+        /// Path to the encrypted Aegis or 2FAS backup file
         file: PathBuf,
         /// Optional output file path (defaults to stdout)
         #[arg(short, long)]
@@ -75,10 +81,101 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn is_kdbx_path(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "kdbx" {
+        return true;
+    }
+    if path.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("kdbx"))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_twofas_path(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "2fas" {
+        return true;
+    }
+    if path.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("2fas"))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if ext == "json" {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if content.contains("servicesEncrypted")
+                || (content.contains("schemaVersion") && content.contains("services"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_aegis_path(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "enc" {
+        return true;
+    }
+    if ext == "json" {
+        return true;
+    }
+    if path.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("enc"))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Detect and load accounts from a source path, prompting for password if necessary.
 fn load_accounts(
     source_path: Option<&Path>,
     cli_password: Option<&str>,
+    cli_keyfile: Option<&Path>,
 ) -> Result<Vec<OtpAccount>, Box<dyn std::error::Error>> {
     let path = match source_path {
         Some(p) => p.to_path_buf(),
@@ -86,13 +183,16 @@ fn load_accounts(
             // Default discovery locations
             let candidates = [
                 PathBuf::from("examples/sample.uri"),
+                PathBuf::from("examples/keepass_vault.kdbx"),
+                PathBuf::from("examples/2fas_plain.2fas"),
+                PathBuf::from("examples/2fas_encrypted.2fas"),
                 PathBuf::from("examples/aegis_plain.json"),
                 PathBuf::from("examples/aegis_encrypted.json"),
             ];
             candidates
                 .into_iter()
                 .find(|p| p.exists())
-                .ok_or("No source specified. Use --source <file> (e.g. --source examples/sample.uri)")?
+                .ok_or("No source specified. Use --source <file> (e.g. --source examples/keepass_vault.kdbx)")?
         }
     };
 
@@ -101,13 +201,80 @@ fn load_accounts(
     }
 
     let is_dir = path.is_dir();
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
 
-    if is_dir || ext == "json" {
+    if is_kdbx_path(&path) {
+        let mut kdbx = KdbxSource::from_file(&path);
+        if is_dir {
+            let resolved = kdbx.resolve_file()?;
+            eprintln!(
+                "📁 Detected KeePassXC database folder: {}",
+                path.display()
+            );
+            eprintln!(
+                "   -> Auto-detected latest database: {}",
+                resolved.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+
+        if let Some(kf) = cli_keyfile {
+            kdbx = kdbx.with_keyfile(kf);
+        }
+
+        let password = match cli_password {
+            Some(p) => Some(p.to_string()),
+            None => {
+                if cli_keyfile.is_some() {
+                    let p = rpassword::prompt_password(format!(
+                        "🔐 Enter password for KeePassXC database ({}) [press Enter if keyfile-only]: ",
+                        path.display()
+                    ))?;
+                    if p.is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    }
+                } else {
+                    Some(rpassword::prompt_password(format!(
+                        "🔐 Enter password for KeePassXC database ({}): ",
+                        path.display()
+                    ))?)
+                }
+            }
+        };
+
+        if let Some(pwd) = password {
+            kdbx = kdbx.with_password(pwd);
+        }
+
+        let accounts = kdbx.load()?;
+        Ok(accounts)
+    } else if is_twofas_path(&path) {
+        let mut twofas = TwoFasSource::from_file(&path);
+        if is_dir {
+            let resolved = twofas.resolve_file()?;
+            eprintln!(
+                "📁 Detected 2FAS backup folder: {}",
+                path.display()
+            );
+            eprintln!(
+                "   -> Auto-detected latest backup: {}",
+                resolved.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+
+        if twofas.is_encrypted()? {
+            let password = match cli_password {
+                Some(p) => p.to_string(),
+                None => rpassword::prompt_password(format!(
+                    "🔐 Enter password for 2FAS backup ({}): ",
+                    path.display()
+                ))?,
+            };
+            twofas = twofas.with_password(password);
+        }
+        let accounts = twofas.load()?;
+        Ok(accounts)
+    } else if is_aegis_path(&path) {
         let mut aegis = AegisSource::from_file(&path);
         if is_dir {
             let resolved = aegis.resolve_file()?;
@@ -313,7 +480,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::List) {
         Commands::List => {
-            let accounts = load_accounts(cli.source.as_deref(), cli.password.as_deref())?;
+            let accounts = load_accounts(
+                cli.source.as_deref(),
+                cli.password.as_deref(),
+                cli.keyfile.as_deref(),
+            )?;
             let ts = now_secs();
 
             println!();
@@ -332,7 +503,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Search { query } => {
-            let accounts = load_accounts(cli.source.as_deref(), cli.password.as_deref())?;
+            let accounts = load_accounts(
+                cli.source.as_deref(),
+                cli.password.as_deref(),
+                cli.keyfile.as_deref(),
+            )?;
             let searcher = AccountSearcher::new();
             let matches = searcher.search(&accounts, &query);
 
@@ -357,7 +532,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Get { query } => {
-            let accounts = load_accounts(cli.source.as_deref(), cli.password.as_deref())?;
+            let accounts = load_accounts(
+                cli.source.as_deref(),
+                cli.password.as_deref(),
+                cli.keyfile.as_deref(),
+            )?;
             let searcher = AccountSearcher::new();
             let matches = searcher.search(&accounts, &query);
 
@@ -371,7 +550,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Copy { query } => {
-            let accounts = load_accounts(cli.source.as_deref(), cli.password.as_deref())?;
+            let accounts = load_accounts(
+                cli.source.as_deref(),
+                cli.password.as_deref(),
+                cli.keyfile.as_deref(),
+            )?;
             let searcher = AccountSearcher::new();
             let matches = searcher.search(&accounts, &query);
 
@@ -414,23 +597,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Watch => {
-            let accounts = load_accounts(cli.source.as_deref(), cli.password.as_deref())?;
+            let accounts = load_accounts(
+                cli.source.as_deref(),
+                cli.password.as_deref(),
+                cli.keyfile.as_deref(),
+            )?;
             run_watch_mode(accounts)?;
         }
 
         Commands::Decrypt { file, output } => {
-            let mut aegis = AegisSource::from_file(&file);
-            if aegis.is_encrypted()? {
-                let password = match cli.password {
-                    Some(p) => p,
-                    None => rpassword::prompt_password(format!(
-                        "🔐 Enter password for Aegis vault ({}): ",
-                        file.display()
-                    ))?,
+            let accounts = if is_kdbx_path(&file) {
+                let mut kdbx = KdbxSource::from_file(&file);
+                if let Some(kf) = cli.keyfile.as_deref() {
+                    kdbx = kdbx.with_keyfile(kf);
+                }
+                let password = match cli.password.as_deref() {
+                    Some(p) => Some(p.to_string()),
+                    None => {
+                        if cli.keyfile.is_some() {
+                            let p = rpassword::prompt_password(format!(
+                                "🔐 Enter password for KeePassXC database ({}) [press Enter if keyfile-only]: ",
+                                file.display()
+                            ))?;
+                            if p.is_empty() {
+                                None
+                            } else {
+                                Some(p)
+                            }
+                        } else {
+                            Some(rpassword::prompt_password(format!(
+                                "🔐 Enter password for KeePassXC database ({}): ",
+                                file.display()
+                            ))?)
+                        }
+                    }
                 };
-                aegis = aegis.with_password(password);
-            }
-            let accounts = aegis.load()?;
+                if let Some(pwd) = password {
+                    kdbx = kdbx.with_password(pwd);
+                }
+                kdbx.load()?
+            } else if is_twofas_path(&file) {
+                let mut twofas = TwoFasSource::from_file(&file);
+                if twofas.is_encrypted()? {
+                    let password = match cli.password {
+                        Some(p) => p,
+                        None => rpassword::prompt_password(format!(
+                            "🔐 Enter password for 2FAS backup ({}): ",
+                            file.display()
+                        ))?,
+                    };
+                    twofas = twofas.with_password(password);
+                }
+                twofas.load()?
+            } else {
+                let mut aegis = AegisSource::from_file(&file);
+                if aegis.is_encrypted()? {
+                    let password = match cli.password {
+                        Some(p) => p,
+                        None => rpassword::prompt_password(format!(
+                            "🔐 Enter password for Aegis vault ({}): ",
+                            file.display()
+                        ))?,
+                    };
+                    aegis = aegis.with_password(password);
+                }
+                aegis.load()?
+            };
+
             let json_out = serde_json::to_string_pretty(&accounts)?;
 
             if let Some(out_path) = output {

@@ -4,6 +4,8 @@ use eframe::egui::{
     Stroke, Vec2,
 };
 use rune_adapter_aegis::AegisSource;
+use rune_adapter_kdbx::KdbxSource;
+use rune_adapter_twofas::TwoFasSource;
 use rune_adapter_uri::UriSource;
 use rune_core::models::OtpAccount;
 use rune_core::otp::generate_account_code;
@@ -99,6 +101,9 @@ impl AppConfig {
         let mut defaults = Vec::new();
         let candidates = [
             ("Sample URIs", "examples/sample.uri", None),
+            ("KeePassXC", "examples/keepass_vault.kdbx", Some("password123")),
+            ("2FAS (Plain)", "examples/2fas_plain.2fas", None),
+            ("2FAS (Encrypted)", "examples/2fas_encrypted.2fas", Some("example.com")),
             ("Aegis (Plain)", "examples/aegis_plain.json", None),
             ("Aegis (Encrypted)", "examples/aegis_encrypted.json", Some("test")),
         ];
@@ -208,12 +213,69 @@ fn draw_keycap_rtl(ui: &mut egui::Ui, key: &str, action: &str) {
     });
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceKind {
+    Kdbx,
+    TwoFas,
+    Aegis,
+    Uri,
+}
+
+fn detect_source_kind(path: &std::path::Path) -> SourceKind {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "kdbx" {
+        return SourceKind::Kdbx;
+    }
+    if ext == "2fas" {
+        return SourceKind::TwoFas;
+    }
+    if path.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(e) = p.extension().and_then(|e| e.to_str()) {
+                    if e.eq_ignore_ascii_case("kdbx") {
+                        return SourceKind::Kdbx;
+                    }
+                    if e.eq_ignore_ascii_case("2fas") {
+                        return SourceKind::TwoFas;
+                    }
+                    if e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("enc") {
+                        return SourceKind::Aegis;
+                    }
+                }
+            }
+        }
+    }
+    if ext == "json" {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if content.contains("servicesEncrypted")
+                || (content.contains("schemaVersion") && content.contains("services"))
+            {
+                return SourceKind::TwoFas;
+            }
+        }
+        return SourceKind::Aegis;
+    }
+    if ext == "enc" {
+        return SourceKind::Aegis;
+    }
+    if path.is_dir() {
+        return SourceKind::Aegis;
+    }
+    SourceKind::Uri
+}
+
 #[derive(Clone, Debug)]
 struct SourceOption {
     name: String,
     path: PathBuf,
     is_dir: bool,
-    is_aegis: bool,
+    kind: SourceKind,
     is_encrypted: bool,
     cached_password: Option<String>,
 }
@@ -221,9 +283,18 @@ struct SourceOption {
 impl SourceOption {
     fn latest_file_name(&self) -> Option<String> {
         if self.is_dir {
-            rune_adapter_aegis::find_latest_aegis_backup(&self.path)
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            match self.kind {
+                SourceKind::Kdbx => rune_adapter_kdbx::find_latest_kdbx_file(&self.path)
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
+                SourceKind::TwoFas => rune_adapter_twofas::find_latest_2fas_backup(&self.path)
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
+                SourceKind::Aegis => rune_adapter_aegis::find_latest_aegis_backup(&self.path)
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
+                SourceKind::Uri => None,
+            }
         } else {
             self.path.file_name().map(|n| n.to_string_lossy().to_string())
         }
@@ -266,9 +337,14 @@ impl RuneApp {
 
         for s in cfg.sources {
             let is_dir = s.path.is_dir();
-            let is_aegis = is_dir || s.path.extension().and_then(|e| e.to_str()) == Some("json");
-            let is_enc = if is_aegis && s.path.exists() {
-                AegisSource::from_file(&s.path).is_encrypted().unwrap_or(false)
+            let kind = detect_source_kind(&s.path);
+            let is_enc = if s.path.exists() {
+                match kind {
+                    SourceKind::Kdbx => true,
+                    SourceKind::TwoFas => TwoFasSource::from_file(&s.path).is_encrypted().unwrap_or(false),
+                    SourceKind::Aegis => AegisSource::from_file(&s.path).is_encrypted().unwrap_or(false),
+                    SourceKind::Uri => false,
+                }
             } else {
                 false
             };
@@ -277,7 +353,7 @@ impl RuneApp {
                 name: s.name,
                 path: s.path,
                 is_dir,
-                is_aegis,
+                kind,
                 is_encrypted: is_enc,
                 cached_password: s.password,
             });
@@ -345,16 +421,14 @@ impl RuneApp {
         let src = &self.sources[self.active_source_idx];
         let path = src.path.clone();
 
-        if src.is_aegis {
-            let mut aegis = AegisSource::from_file(&path);
-            let is_enc = aegis.is_encrypted().unwrap_or(false);
-
-            if is_enc {
+        match src.kind {
+            SourceKind::Kdbx => {
+                let mut kdbx = KdbxSource::from_file(&path);
                 let effective_pwd = password.or(src.cached_password.as_deref());
                 match effective_pwd {
                     Some(pwd) => {
-                        aegis = aegis.with_password(pwd);
-                        match aegis.load() {
+                        kdbx = kdbx.with_password(pwd);
+                        match kdbx.load() {
                             Ok(accs) => {
                                 self.accounts = accs;
                                 self.pending_vault_path = None;
@@ -362,7 +436,7 @@ impl RuneApp {
                                 self.password_input.clear();
                                 if notify {
                                     if src.is_dir {
-                                        let rname = aegis.resolve_file().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| src.name.clone());
+                                        let rname = kdbx.resolve_file().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| src.name.clone());
                                         self.set_toast(format!("Loaded latest: {rname}"));
                                     } else {
                                         self.set_toast(format!("Loaded {}", src.name));
@@ -381,8 +455,92 @@ impl RuneApp {
                         self.password_input.clear();
                     }
                 }
-            } else {
-                if let Ok(accs) = aegis.load() {
+            }
+            SourceKind::TwoFas => {
+                let mut twofas = TwoFasSource::from_file(&path);
+                let is_enc = twofas.is_encrypted().unwrap_or(false);
+
+                if is_enc {
+                    let effective_pwd = password.or(src.cached_password.as_deref());
+                    match effective_pwd {
+                        Some(pwd) => {
+                            twofas = twofas.with_password(pwd);
+                            match twofas.load() {
+                                Ok(accs) => {
+                                    self.accounts = accs;
+                                    self.pending_vault_path = None;
+                                    self.password_error = None;
+                                    self.password_input.clear();
+                                    if notify {
+                                        if src.is_dir {
+                                            let rname = twofas.resolve_file().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| src.name.clone());
+                                            self.set_toast(format!("Loaded latest: {rname}"));
+                                        } else {
+                                            self.set_toast(format!("Loaded {}", src.name));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.pending_vault_path = Some(path);
+                                    self.password_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                        None => {
+                            self.pending_vault_path = Some(path);
+                            self.password_error = None;
+                            self.password_input.clear();
+                        }
+                    }
+                } else if let Ok(accs) = twofas.load() {
+                    self.accounts = accs;
+                    if notify {
+                        if src.is_dir {
+                            let rname = twofas.resolve_file().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| src.name.clone());
+                            self.set_toast(format!("Loaded latest: {rname}"));
+                        } else {
+                            self.set_toast(format!("Loaded {}", src.name));
+                        }
+                    }
+                }
+            }
+            SourceKind::Aegis => {
+                let mut aegis = AegisSource::from_file(&path);
+                let is_enc = aegis.is_encrypted().unwrap_or(false);
+
+                if is_enc {
+                    let effective_pwd = password.or(src.cached_password.as_deref());
+                    match effective_pwd {
+                        Some(pwd) => {
+                            aegis = aegis.with_password(pwd);
+                            match aegis.load() {
+                                Ok(accs) => {
+                                    self.accounts = accs;
+                                    self.pending_vault_path = None;
+                                    self.password_error = None;
+                                    self.password_input.clear();
+                                    if notify {
+                                        if src.is_dir {
+                                            let rname = aegis.resolve_file().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| src.name.clone());
+                                            self.set_toast(format!("Loaded latest: {rname}"));
+                                        } else {
+                                            self.set_toast(format!("Loaded {}", src.name));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.pending_vault_path = Some(path);
+                                    self.password_error = Some(e.to_string());
+                                }
+                            }
+                        }
+                        None => {
+                            self.pending_vault_path = Some(path);
+                            self.password_error = None;
+                            self.password_input.clear();
+                        }
+                    }
+                } else if let Ok(accs) = aegis.load() {
                     self.accounts = accs;
                     if notify {
                         if src.is_dir {
@@ -394,12 +552,13 @@ impl RuneApp {
                     }
                 }
             }
-        } else {
-            let uri_src = UriSource::from_file(&path);
-            if let Ok(accs) = uri_src.load() {
-                self.accounts = accs;
-                if notify {
-                    self.set_toast(format!("Loaded {}", src.name));
+            SourceKind::Uri => {
+                let uri_src = UriSource::from_file(&path);
+                if let Ok(accs) = uri_src.load() {
+                    self.accounts = accs;
+                    if notify {
+                        self.set_toast(format!("Loaded {}", src.name));
+                    }
                 }
             }
         }
@@ -638,8 +797,13 @@ impl eframe::App for RuneApp {
                     let mut cancel_password = false;
                     if let Some(vault_path) = self.pending_vault_path.clone() {
                         ui.group(|ui| {
+                            let prompt_title = match self.sources.get(self.active_source_idx).map(|s| s.kind) {
+                                Some(SourceKind::Kdbx) => "KeePassXC Database Password Required",
+                                Some(SourceKind::TwoFas) => "Encrypted 2FAS Backup Password Required",
+                                _ => "Encrypted Aegis Vault Password Required",
+                            };
                             ui.label(
-                                RichText::new("Encrypted Aegis Vault Password Required")
+                                RichText::new(prompt_title)
                                     .strong()
                                     .color(Color32::from_rgb(245, 158, 11)),
                             );
@@ -920,16 +1084,33 @@ impl eframe::App for RuneApp {
                                                             if is_active {
                                                                 ui.label(RichText::new("(Active)").size(11.0).color(accent_emerald).strong());
                                                             }
-                                                            let type_label = if s.is_aegis {
-                                                                if s.is_dir {
-                                                                    if s.is_encrypted { "Aegis Sync Folder (Encrypted)" } else { "Aegis Sync Folder (Plain)" }
-                                                                } else if s.is_encrypted {
-                                                                    "Aegis AES-256-GCM"
-                                                                } else {
-                                                                    "Aegis Plain JSON"
+                                                            let type_label = match s.kind {
+                                                                SourceKind::Kdbx => {
+                                                                    if s.is_dir {
+                                                                        "KeePassXC Folder (.kdbx)"
+                                                                    } else {
+                                                                        "KeePassXC KDBX"
+                                                                    }
                                                                 }
-                                                            } else {
-                                                                "URI Collection"
+                                                                SourceKind::TwoFas => {
+                                                                    if s.is_dir {
+                                                                        if s.is_encrypted { "2FAS Sync Folder (Encrypted)" } else { "2FAS Sync Folder (Plain)" }
+                                                                    } else if s.is_encrypted {
+                                                                        "2FAS AES-256-GCM"
+                                                                    } else {
+                                                                        "2FAS Plain JSON"
+                                                                    }
+                                                                }
+                                                                SourceKind::Aegis => {
+                                                                    if s.is_dir {
+                                                                        if s.is_encrypted { "Aegis Sync Folder (Encrypted)" } else { "Aegis Sync Folder (Plain)" }
+                                                                    } else if s.is_encrypted {
+                                                                        "Aegis AES-256-GCM"
+                                                                    } else {
+                                                                        "Aegis Plain JSON"
+                                                                    }
+                                                                }
+                                                                SourceKind::Uri => "URI Collection",
                                                             };
                                                             ui.label(RichText::new(type_label).size(10.0).color(text_muted));
                                                         });
@@ -953,16 +1134,14 @@ impl eframe::App for RuneApp {
 
                                                     // Actions
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if self.sources.len() > 1 {
-                                                            if ui.button(RichText::new("Delete").size(10.5).color(Color32::from_rgb(244, 63, 94))).clicked() {
-                                                                remove_idx = Some(idx);
-                                                            }
+                                                        if self.sources.len() > 1
+                                                            && ui.button(RichText::new("Delete").size(10.5).color(Color32::from_rgb(244, 63, 94))).clicked() {
+                                                            remove_idx = Some(idx);
                                                         }
 
-                                                        if !is_active {
-                                                            if ui.button(RichText::new("Use").size(10.5)).clicked() {
-                                                                select_idx = Some(idx);
-                                                            }
+                                                        if !is_active
+                                                            && ui.button(RichText::new("Use").size(10.5)).clicked() {
+                                                            select_idx = Some(idx);
                                                         }
                                                     });
                                                 });
@@ -1054,8 +1233,13 @@ impl eframe::App for RuneApp {
                                     self.set_toast("Password cleared");
                                 } else {
                                     let path = self.sources[idx].path.clone();
-                                    let aegis = AegisSource::from_file(&path).with_password(&pwd_to_test);
-                                    match aegis.load() {
+                                    let load_res = match self.sources[idx].kind {
+                                        SourceKind::Kdbx => KdbxSource::from_file(&path).with_password(&pwd_to_test).load(),
+                                        SourceKind::TwoFas => TwoFasSource::from_file(&path).with_password(&pwd_to_test).load(),
+                                        SourceKind::Aegis => AegisSource::from_file(&path).with_password(&pwd_to_test).load(),
+                                        SourceKind::Uri => UriSource::from_file(&path).load(),
+                                    };
+                                    match load_res {
                                         Ok(accs) => {
                                             if let Some(s) = self.sources.get_mut(idx) {
                                                 s.cached_password = Some(pwd_to_test.clone());
@@ -1120,33 +1304,60 @@ impl eframe::App for RuneApp {
                                                 ui.add_sized(
                                                     Vec2::new(ui.available_width() - 10.0, 24.0),
                                                     egui::TextEdit::singleline(&mut self.new_src_path)
-                                                        .hint_text("/path/to/vault.json or .uri"),
+                                                        .hint_text("/path/to/vault.2fas, .json, or .uri"),
                                                 );
                                             });
 
                                             let p = PathBuf::from(self.new_src_path.trim());
                                             let is_dir = p.is_dir();
                                             let mut latest_backup_detected = None;
+                                            let detected_kind = if p.exists() { Some(detect_source_kind(&p)) } else { None };
 
                                             let is_encrypted = if is_dir {
-                                                if let Ok(latest) = rune_adapter_aegis::find_latest_aegis_backup(&p) {
-                                                    let is_enc = AegisSource::from_file(&latest).is_encrypted().unwrap_or(false);
-                                                    latest_backup_detected = Some((latest, is_enc));
-                                                    is_enc
-                                                } else {
-                                                    false
+                                                match detected_kind {
+                                                    Some(SourceKind::Kdbx) => {
+                                                        if let Ok(latest) = rune_adapter_kdbx::find_latest_kdbx_file(&p) {
+                                                            latest_backup_detected = Some((latest, true, "KeePassXC"));
+                                                            true
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }
+                                                    Some(SourceKind::TwoFas) => {
+                                                        if let Ok(latest) = rune_adapter_twofas::find_latest_2fas_backup(&p) {
+                                                            let is_enc = TwoFasSource::from_file(&latest).is_encrypted().unwrap_or(false);
+                                                            latest_backup_detected = Some((latest, is_enc, "2FAS"));
+                                                            is_enc
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        if let Ok(latest) = rune_adapter_aegis::find_latest_aegis_backup(&p) {
+                                                            let is_enc = AegisSource::from_file(&latest).is_encrypted().unwrap_or(false);
+                                                            latest_backup_detected = Some((latest, is_enc, "Aegis"));
+                                                            is_enc
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }
                                                 }
-                                            } else if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("json") {
-                                                AegisSource::from_file(&p).is_encrypted().unwrap_or(false)
+                                            } else if p.is_file() {
+                                                match detected_kind {
+                                                    Some(SourceKind::Kdbx) => true,
+                                                    Some(SourceKind::TwoFas) => TwoFasSource::from_file(&p).is_encrypted().unwrap_or(false),
+                                                    Some(SourceKind::Aegis) => AegisSource::from_file(&p).is_encrypted().unwrap_or(false),
+                                                    _ => false,
+                                                }
                                             } else {
                                                 false
                                             };
 
-                                            if let Some((latest, is_enc)) = &latest_backup_detected {
+                                            if let Some((latest, is_enc, flavor)) = &latest_backup_detected {
                                                 ui.add_space(2.0);
                                                 let enc_text = if *is_enc { " (Encrypted AES-GCM)" } else { " (Plain)" };
                                                 let label = format!(
-                                                    "-> Detected Aegis Backup Folder! Latest: {}{}",
+                                                    "-> Detected {flavor} Backup Folder! Latest: {}{}",
                                                     latest.file_name().unwrap_or_default().to_string_lossy(),
                                                     enc_text
                                                 );
@@ -1180,9 +1391,33 @@ impl eframe::App for RuneApp {
                                                 ui.add_space(10.0);
                                                 ui.label(RichText::new("Quick presets:").size(10.5).color(text_muted));
 
-                                                if ui.button(RichText::new("+ Aegis Sync Folder").size(10.0)).clicked() {
+                                                if ui.button(RichText::new("+ KeePassXC (.kdbx)").size(10.0)).clicked() {
+                                                    self.new_src_name = "KeePassXC".to_string();
+                                                    self.new_src_path = "examples/keepass_vault.kdbx".to_string();
+                                                    self.new_src_password = "password123".to_string();
+                                                }
+
+                                                if ui.button(RichText::new("+ 2FAS (Plain)").size(10.0)).clicked() {
+                                                    self.new_src_name = "2FAS (Plain)".to_string();
+                                                    self.new_src_path = "examples/2fas_plain.2fas".to_string();
+                                                    self.new_src_password.clear();
+                                                }
+
+                                                if ui.button(RichText::new("+ 2FAS (Encrypted)").size(10.0)).clicked() {
+                                                    self.new_src_name = "2FAS (Encrypted)".to_string();
+                                                    self.new_src_path = "examples/2fas_encrypted.2fas".to_string();
+                                                    self.new_src_password = "example.com".to_string();
+                                                }
+
+                                                if ui.button(RichText::new("+ Aegis Sync").size(10.0)).clicked() {
                                                     self.new_src_name = "Aegis Sync Backups".to_string();
                                                     self.new_src_path = "examples/aegis_sync".to_string();
+                                                    self.new_src_password = "test".to_string();
+                                                }
+
+                                                if ui.button(RichText::new("+ Encrypted Aegis").size(10.0)).clicked() {
+                                                    self.new_src_name = "Aegis (Encrypted)".to_string();
+                                                    self.new_src_path = "examples/aegis_encrypted.json".to_string();
                                                     self.new_src_password = "test".to_string();
                                                 }
 
@@ -1190,12 +1425,6 @@ impl eframe::App for RuneApp {
                                                     self.new_src_name = "Sample URIs".to_string();
                                                     self.new_src_path = "examples/sample.uri".to_string();
                                                     self.new_src_password.clear();
-                                                }
-
-                                                if ui.button(RichText::new("+ Encrypted Aegis").size(10.0)).clicked() {
-                                                    self.new_src_name = "Aegis (Encrypted)".to_string();
-                                                    self.new_src_path = "examples/aegis_encrypted.json".to_string();
-                                                    self.new_src_password = "test".to_string();
                                                 }
                                             });
                                         });
@@ -1209,26 +1438,27 @@ impl eframe::App for RuneApp {
                                     self.new_src_status = Some((true, "Path does not exist".to_string()));
                                 } else {
                                     let is_dir = path.is_dir();
-                                    let is_aegis = is_dir || path.extension().and_then(|e| e.to_str()) == Some("json");
+                                    let kind = detect_source_kind(&path);
                                     let name = if self.new_src_name.trim().is_empty() {
                                         path.file_name().and_then(|n| n.to_str()).unwrap_or("Source").to_string()
                                     } else {
                                         self.new_src_name.trim().to_string()
                                     };
 
-                                    if is_aegis {
-                                        let mut aegis = AegisSource::from_file(&path);
-                                        let is_enc = aegis.is_encrypted().unwrap_or(false);
-                                        if is_enc {
+                                    match kind {
+                                        SourceKind::Kdbx => {
+                                            let mut kdbx = KdbxSource::from_file(&path);
                                             let pwd = self.new_src_password.clone();
-                                            aegis = aegis.with_password(&pwd);
-                                            match aegis.load() {
+                                            if !pwd.is_empty() {
+                                                kdbx = kdbx.with_password(&pwd);
+                                            }
+                                            match kdbx.load() {
                                                 Ok(accs) => {
                                                     self.sources.push(SourceOption {
                                                         name: name.clone(),
                                                         path: path.clone(),
                                                         is_dir,
-                                                        is_aegis: true,
+                                                        kind,
                                                         is_encrypted: true,
                                                         cached_password: if pwd.is_empty() { None } else { Some(pwd) },
                                                     });
@@ -1241,17 +1471,123 @@ impl eframe::App for RuneApp {
                                                     self.new_src_password.clear();
                                                 }
                                                 Err(e) => {
-                                                    self.new_src_status = Some((true, format!("Decryption failed: {e}")));
+                                                    self.new_src_status = Some((true, format!("KDBX decryption failed: {e}")));
                                                 }
                                             }
-                                        } else {
-                                            match aegis.load() {
+                                        }
+                                        SourceKind::TwoFas => {
+                                            let mut twofas = TwoFasSource::from_file(&path);
+                                            let is_enc = twofas.is_encrypted().unwrap_or(false);
+                                            if is_enc {
+                                                let pwd = self.new_src_password.clone();
+                                                twofas = twofas.with_password(&pwd);
+                                                match twofas.load() {
+                                                    Ok(accs) => {
+                                                        self.sources.push(SourceOption {
+                                                            name: name.clone(),
+                                                            path: path.clone(),
+                                                            is_dir,
+                                                            kind,
+                                                            is_encrypted: true,
+                                                            cached_password: if pwd.is_empty() { None } else { Some(pwd) },
+                                                        });
+                                                        self.active_source_idx = self.sources.len() - 1;
+                                                        self.accounts = accs;
+                                                        self.persist_sources();
+                                                        self.new_src_status = Some((false, format!("Added {name} (verified)!")));
+                                                        self.new_src_name.clear();
+                                                        self.new_src_path.clear();
+                                                        self.new_src_password.clear();
+                                                    }
+                                                    Err(e) => {
+                                                        self.new_src_status = Some((true, format!("Decryption failed: {e}")));
+                                                    }
+                                                }
+                                            } else {
+                                                match twofas.load() {
+                                                    Ok(accs) => {
+                                                        self.sources.push(SourceOption {
+                                                            name: name.clone(),
+                                                            path: path.clone(),
+                                                            is_dir,
+                                                            kind,
+                                                            is_encrypted: false,
+                                                            cached_password: None,
+                                                        });
+                                                        self.active_source_idx = self.sources.len() - 1;
+                                                        self.accounts = accs;
+                                                        self.persist_sources();
+                                                        self.new_src_status = Some((false, format!("Added {name}!")));
+                                                        self.new_src_name.clear();
+                                                        self.new_src_path.clear();
+                                                    }
+                                                    Err(e) => {
+                                                        self.new_src_status = Some((true, format!("Failed to parse: {e}")));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SourceKind::Aegis => {
+                                            let mut aegis = AegisSource::from_file(&path);
+                                            let is_enc = aegis.is_encrypted().unwrap_or(false);
+                                            if is_enc {
+                                                let pwd = self.new_src_password.clone();
+                                                aegis = aegis.with_password(&pwd);
+                                                match aegis.load() {
+                                                    Ok(accs) => {
+                                                        self.sources.push(SourceOption {
+                                                            name: name.clone(),
+                                                            path: path.clone(),
+                                                            is_dir,
+                                                            kind,
+                                                            is_encrypted: true,
+                                                            cached_password: if pwd.is_empty() { None } else { Some(pwd) },
+                                                        });
+                                                        self.active_source_idx = self.sources.len() - 1;
+                                                        self.accounts = accs;
+                                                        self.persist_sources();
+                                                        self.new_src_status = Some((false, format!("Added {name} (verified)!")));
+                                                        self.new_src_name.clear();
+                                                        self.new_src_path.clear();
+                                                        self.new_src_password.clear();
+                                                    }
+                                                    Err(e) => {
+                                                        self.new_src_status = Some((true, format!("Decryption failed: {e}")));
+                                                    }
+                                                }
+                                            } else {
+                                                match aegis.load() {
+                                                    Ok(accs) => {
+                                                        self.sources.push(SourceOption {
+                                                            name: name.clone(),
+                                                            path: path.clone(),
+                                                            is_dir,
+                                                            kind,
+                                                            is_encrypted: false,
+                                                            cached_password: None,
+                                                        });
+                                                        self.active_source_idx = self.sources.len() - 1;
+                                                        self.accounts = accs;
+                                                        self.persist_sources();
+                                                        self.new_src_status = Some((false, format!("Added {name}!")));
+                                                        self.new_src_name.clear();
+                                                        self.new_src_path.clear();
+                                                    }
+                                                    Err(e) => {
+                                                        self.new_src_status = Some((true, format!("Failed to parse: {e}")));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        SourceKind::Uri => {
+                                            let uri_src = UriSource::from_file(&path);
+                                            match uri_src.load() {
                                                 Ok(accs) => {
                                                     self.sources.push(SourceOption {
                                                         name: name.clone(),
                                                         path: path.clone(),
-                                                        is_dir,
-                                                        is_aegis: true,
+                                                        is_dir: false,
+                                                        kind,
                                                         is_encrypted: false,
                                                         cached_password: None,
                                                     });
@@ -1263,31 +1599,8 @@ impl eframe::App for RuneApp {
                                                     self.new_src_path.clear();
                                                 }
                                                 Err(e) => {
-                                                    self.new_src_status = Some((true, format!("Failed to parse: {e}")));
+                                                    self.new_src_status = Some((true, format!("Failed to load URI file: {e}")));
                                                 }
-                                            }
-                                        }
-                                    } else {
-                                        let uri_src = UriSource::from_file(&path);
-                                        match uri_src.load() {
-                                            Ok(accs) => {
-                                                self.sources.push(SourceOption {
-                                                    name: name.clone(),
-                                                    path: path.clone(),
-                                                    is_dir: false,
-                                                    is_aegis: false,
-                                                    is_encrypted: false,
-                                                    cached_password: None,
-                                                });
-                                                self.active_source_idx = self.sources.len() - 1;
-                                                self.accounts = accs;
-                                                self.persist_sources();
-                                                self.new_src_status = Some((false, format!("Added {name}!")));
-                                                self.new_src_name.clear();
-                                                self.new_src_path.clear();
-                                            }
-                                            Err(e) => {
-                                                self.new_src_status = Some((true, format!("Failed to load URI collection: {e}")));
                                             }
                                         }
                                     }
