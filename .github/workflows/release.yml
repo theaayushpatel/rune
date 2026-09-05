@@ -139,8 +139,10 @@ jobs:
           if (-not $iscc) {
             throw "ISCC (Inno Setup Compiler) was not found after installation."
           }
-          Write-Host "Compiling installer using: $iscc"
-          & $iscc assets\rune-installer.iss
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          if (-not $version) { $version = "0.1.0" }
+          Write-Host "Compiling installer using: $iscc (version $version)"
+          & $iscc /O. "/DMyAppVersion=$version" assets\rune-installer.iss
 
           if (-not (Test-Path rune-windows-x86_64-installer.exe)) {
             throw "Expected output rune-windows-x86_64-installer.exe was not created!"
@@ -216,8 +218,11 @@ jobs:
           sips -z 512 512   assets/rune.png --out rune.iconset/icon_512x512.png
           iconutil -c icns rune.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+
           # Create Info.plist
-          cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
+          cat << EOF > "$APP_DIR/Contents/Info.plist"
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -233,7 +238,7 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
-              <string>0.1.0</string>
+              <string>$VERSION</string>
               <key>LSMinimumSystemVersion</key>
               <string>10.15</string>
               <key>NSHighResolutionCapable</key>

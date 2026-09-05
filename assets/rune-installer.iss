@@ -1,5 +1,7 @@
 #define MyAppName "Rune"
+#ifndef MyAppVersion
 #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Aayush Patel"
 #define MyAppURL "https://github.com/theaayushpatel/rune"
 #define MyAppExeName "rune-desktop.exe"
@@ -15,7 +17,7 @@ ChangesEnvironment=yes
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 SourceDir=..
-OutputDir=..
+OutputDir=.
 OutputBaseFilename=rune-windows-x86_64-installer
 SetupIconFile=assets\rune.ico
 Compression=lzma
